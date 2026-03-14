@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /app/requirements.txt
 
 RUN pip install --upgrade pip setuptools wheel && \
-    pip install --index-url https://download.pytorch.org/whl/cu124 torch && \
+    pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision && \
     pip install -r /app/requirements.txt
 
 COPY handler.py /app/handler.py

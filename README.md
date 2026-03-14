@@ -101,7 +101,7 @@ For multi-image editing:
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip setuptools wheel
-pip install --index-url https://download.pytorch.org/whl/cu124 torch
+pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision
 pip install -r requirements.txt
 export HF_TOKEN=hf_your_token_here
 python handler.py
@@ -110,5 +110,6 @@ python handler.py
 ## Notes
 
 - This repo uses `git+https://github.com/huggingface/diffusers` because Qwen image editing support lands there first
+- `torchvision` is required because the Qwen image edit stack pulls in `Qwen2VLVideoProcessor`
 - `true_cfg_scale` is the main guidance knob for Qwen image edit; pass `negative_prompt` as well
 - For fast Hub/GitHub smoke tests, `.runpod/tests.json` uses a lightweight `self_test`
