@@ -37,17 +37,22 @@ PIPELINE = None
 PIPELINE_LOCK = threading.Lock()
 
 
+def _enable_memory_helpers(pipe: QwenImageEditPlusPipeline) -> None:
+    if hasattr(pipe, "enable_vae_tiling"):
+        pipe.enable_vae_tiling()
+    if hasattr(pipe, "enable_vae_slicing"):
+        pipe.enable_vae_slicing()
+
+
 def _configure_pipeline(pipe: QwenImageEditPlusPipeline) -> QwenImageEditPlusPipeline:
     if OFFLOAD_MODE == "none":
         pipe.to("cuda")
     elif OFFLOAD_MODE == "model":
         pipe.enable_model_cpu_offload()
-        pipe.enable_vae_tiling()
-        pipe.enable_vae_slicing()
+        _enable_memory_helpers(pipe)
     elif OFFLOAD_MODE == "sequential":
         pipe.enable_sequential_cpu_offload()
-        pipe.enable_vae_tiling()
-        pipe.enable_vae_slicing()
+        _enable_memory_helpers(pipe)
     else:
         raise RuntimeError(f"Invalid OFFLOAD_MODE={OFFLOAD_MODE}")
     pipe.set_progress_bar_config(disable=None)
