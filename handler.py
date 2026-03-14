@@ -17,8 +17,8 @@ def handler(job):
         return {
             "ok": True,
             "self_test": True,
-            "model_id": os.getenv("MODEL_ID", "Qwen/Qwen-Image-Edit-2511"),
-            "offload_mode": os.getenv("OFFLOAD_MODE", "model"),
+            "model_id": "unsloth/Qwen-Image-Edit-2511-GGUF::qwen-image-edit-2511-Q2_K.gguf",
+            "runtime": "comfyui-gguf",
         }
 
     try:

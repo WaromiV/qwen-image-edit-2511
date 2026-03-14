@@ -1,6 +1,15 @@
-# Qwen Image Edit 2511 RunPod Worker
+# Qwen Image Edit 2511 GGUF RunPod Worker
 
-Queue-based RunPod Serverless worker for `Qwen/Qwen-Image-Edit-2511`.
+Queue-based RunPod Serverless worker for `unsloth/Qwen-Image-Edit-2511-GGUF` using the `qwen-image-edit-2511-Q2_K.gguf` variant through headless ComfyUI + ComfyUI-GGUF.
+
+## What Changed
+
+This repo no longer uses Diffusers.
+
+- Runtime stack: `ComfyUI` + `ComfyUI-GGUF`
+- Quantized model: `qwen-image-edit-2511-Q2_K.gguf`
+- Text encoder: `qwen_2.5_vl_7b_fp8_scaled.safetensors`
+- VAE: `qwen_image_vae.safetensors`
 
 ## Repo Layout
 
@@ -9,6 +18,8 @@ Queue-based RunPod Serverless worker for `Qwen/Qwen-Image-Edit-2511`.
 ├── app/
 │   ├── __init__.py
 │   └── logic.py
+├── workflow/
+│   └── qwen_image_edit_2511_gguf_single.json
 ├── .dockerignore
 ├── .gitignore
 ├── .runpod/
@@ -18,98 +29,72 @@ Queue-based RunPod Serverless worker for `Qwen/Qwen-Image-Edit-2511`.
 ├── handler.py
 ├── README.md
 ├── requirements.txt
+├── start.sh
 └── test_input.json
 ```
 
-## Features
+## Required Model Files
 
-- Standard `runpod.serverless.start({"handler": handler})` worker
-- Supports single-image and multi-image editing
-- Accepts `image_base64`, `image_url`, `image_path`, or `images`
-- Returns base64 output in JSON
-- Uses `/runpod-volume/huggingface` automatically when a network volume is mounted
-- CPU offloading is disabled and the pipeline is hardcoded to run on GPU only
+The worker downloads and links these automatically:
+
+- `https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF/resolve/main/qwen-image-edit-2511-Q2_K.gguf`
+- `https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors`
+- `https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors`
+
+If `/runpod-volume` is mounted, the worker auto-caches these under `/runpod-volume/huggingface/qwen-image-edit-2511-gguf`.
 
 ## Input Shape
 
 ```json
 {
   "input": {
-    "prompt": "Turn this product shot into a polished industrial concept render.",
+    "prompt": "Turn this concept sketch into a polished industrial render.",
     "image_base64": "<base64>",
-    "num_inference_steps": 40,
+    "num_inference_steps": 20,
     "true_cfg_scale": 4.0,
-    "negative_prompt": " ",
     "width": 1024,
     "height": 1024,
-    "seed": 0,
-    "output_format": "png"
+    "seed": 0
   }
 }
 ```
 
-For multi-image editing:
+Accepted image inputs:
 
-```json
-{
-  "input": {
-    "prompt": "Place these two characters into a shared cinematic scene.",
-    "images": [
-      {"image_base64": "<base64-1>"},
-      {"image_base64": "<base64-2>"}
-    ]
-  }
-}
-```
+- `image_base64`
+- `image_url`
+- `image_path`
+- `images` (only the first image is used in the current single-image workflow)
 
 ## Output Shape
 
 ```json
 {
   "ok": true,
-  "model_id": "Qwen/Qwen-Image-Edit-2511",
-  "offload_mode": "model",
+  "model_id": "unsloth/Qwen-Image-Edit-2511-GGUF::qwen-image-edit-2511-Q2_K.gguf",
+  "runtime": "comfyui-gguf",
   "seed": 0,
-  "num_inference_steps": 40,
+  "num_inference_steps": 20,
   "true_cfg_scale": 4.0,
   "width": 1024,
   "height": 1024,
   "mime_type": "image/png",
-  "image_base64": "<base64>"
+  "image_base64": "<base64>",
+  "prompt_id": "<comfy-prompt-id>",
+  "output_filename": "<saved-file>"
 }
 ```
 
-## Runtime Environment
-
-- `MODEL_ID` defaults to `Qwen/Qwen-Image-Edit-2511`
-- `OFFLOAD_MODE` is effectively hardcoded to `none` in code; CPU offloading is disabled
-- `PRELOAD_MODEL=1` preloads on worker startup; default is `0`
-- `HF_HOME`, `HUGGINGFACE_HUB_CACHE`, `TRANSFORMERS_CACHE` should point at `/runpod-volume/...` when using a network volume
-- `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is set in the Docker image to reduce fragmentation issues
-
-## Recommended RunPod Endpoint Settings
+## Recommended RunPod Settings
 
 - Endpoint type: `Queue`
-- Container disk: at least `40 GB`
-- Network volume: attach one and mount it
-- `HF_TOKEN`: required if model access is gated in your account context
-- Use a GPU tier with enough VRAM because CPU offloading is disabled
-
-## Local Test
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip setuptools wheel
-pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision
-pip install -r requirements.txt
-export HF_TOKEN=hf_your_token_here
-python handler.py
-```
+- GPU: `A40` or stronger
+- Container disk: `40 GB+`
+- Network volume: attach one if you want persistent downloaded models; default cache path is `/runpod-volume/huggingface/qwen-image-edit-2511-gguf`
+- `PRELOAD_MODEL=0` for easier startup; set `1` only if you intentionally keep workers warm
 
 ## Notes
 
-- This repo uses `git+https://github.com/huggingface/diffusers` because Qwen image editing support lands there first
-- `torchvision` is required because the Qwen image edit stack pulls in `Qwen2VLVideoProcessor`
-- `true_cfg_scale` is the main guidance knob for Qwen image edit; pass `negative_prompt` as well
-- For fast Hub/GitHub smoke tests, `.runpod/tests.json` uses a lightweight `self_test`
+- This repo mandates the `Q2_K` GGUF variant for maximum compression
+- Current workflow is single-image edit only
+- It uses ComfyUI native Qwen edit nodes and swaps the stock model loader for `UnetLoaderGGUF`
