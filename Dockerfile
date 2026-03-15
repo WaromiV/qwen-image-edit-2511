@@ -1,8 +1,8 @@
-FROM python:3.11-slim
+FROM runpod/worker-comfyui:5.5.1-base
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    COMFYUI_DIR=/opt/ComfyUI \
+    COMFYUI_DIR=/comfyui \
     COMFY_HOST=127.0.0.1 \
     COMFY_PORT=8188 \
     HF_HOME=/runpod-volume/huggingface \
@@ -13,24 +13,13 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
-    python3-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY requirements.txt /app/requirements.txt
 
 RUN pip install --upgrade pip setuptools wheel && \
-    pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision && \
     pip install -r /app/requirements.txt && \
-    git clone https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI && \
-    git clone https://github.com/city96/ComfyUI-GGUF /opt/ComfyUI/custom_nodes/ComfyUI-GGUF && \
-    pip install -r /opt/ComfyUI/requirements.txt && \
-    pip install -r /opt/ComfyUI/custom_nodes/ComfyUI-GGUF/requirements.txt
+    rm -rf /comfyui/custom_nodes/ComfyUI-GGUF && \
+    git clone --depth=1 https://github.com/city96/ComfyUI-GGUF /comfyui/custom_nodes/ComfyUI-GGUF && \
+    pip install -r /comfyui/custom_nodes/ComfyUI-GGUF/requirements.txt
 
 COPY handler.py /app/handler.py
 COPY app /app/app

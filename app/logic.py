@@ -14,7 +14,7 @@ import requests
 from PIL import Image
 
 RUNPOD_VOLUME = Path(os.getenv("RUNPOD_VOLUME", "/runpod-volume"))
-COMFYUI_DIR = Path(os.getenv("COMFYUI_DIR", "/opt/ComfyUI"))
+COMFYUI_DIR = Path(os.getenv("COMFYUI_DIR", "/comfyui"))
 COMFY_HOST = os.getenv("COMFY_HOST", "127.0.0.1")
 COMFY_PORT = int(os.getenv("COMFY_PORT", "8188"))
 COMFY_BASE_URL = f"http://{COMFY_HOST}:{COMFY_PORT}"

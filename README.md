@@ -2,6 +2,8 @@
 
 Queue-based RunPod Serverless worker for `unsloth/Qwen-Image-Edit-2511-GGUF` using the `qwen-image-edit-2511-Q2_K.gguf` variant through headless ComfyUI + ComfyUI-GGUF.
 
+The image build is trimmed for RunPod's builder by starting from `runpod/worker-comfyui:5.5.1-base` instead of installing ComfyUI from scratch.
+
 ## What Changed
 
 This repo no longer uses Diffusers.
@@ -10,6 +12,7 @@ This repo no longer uses Diffusers.
 - Quantized model: `qwen-image-edit-2511-Q2_K.gguf`
 - Text encoder: `qwen_2.5_vl_7b_fp8_scaled.safetensors`
 - VAE: `qwen_image_vae.safetensors`
+- Base image: `runpod/worker-comfyui:5.5.1-base`
 
 ## Repo Layout
 
@@ -41,7 +44,7 @@ The worker downloads and links these automatically:
 - `https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors`
 - `https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors`
 
-If `/runpod-volume` is mounted, the worker auto-caches these under `/runpod-volume/huggingface/qwen-image-edit-2511-gguf`.
+If `/runpod-volume` is mounted, the worker auto-caches these under `/runpod-volume/huggingface/qwen-image-edit-2511-gguf` and links them into `/comfyui/models/...`.
 
 ## Input Shape
 
@@ -92,6 +95,13 @@ Accepted image inputs:
 - Container disk: `40 GB+`
 - Network volume: attach one if you want persistent downloaded models; default cache path is `/runpod-volume/huggingface/qwen-image-edit-2511-gguf`
 - `PRELOAD_MODEL=0` for easier startup; set `1` only if you intentionally keep workers warm
+
+## Pod Volume Notes
+
+- The worker expects the RunPod network volume mount at `/runpod-volume`
+- Model cache defaults to `/runpod-volume/huggingface/qwen-image-edit-2511-gguf`
+- Hugging Face cache envs also point at `/runpod-volume/huggingface`
+- If the volume is not mounted, the worker falls back to `/opt/model-cache/qwen-image-edit-2511-gguf`
 
 ## Notes
 
