@@ -2,6 +2,7 @@ FROM runpod/worker-comfyui:5.5.1-base
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    NVIDIA_DISABLE_REQUIRE=1 \
     COMFYUI_DIR=/comfyui \
     COMFY_HOST=127.0.0.1 \
     COMFY_PORT=8188 \

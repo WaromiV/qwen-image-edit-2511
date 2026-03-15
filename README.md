@@ -4,6 +4,8 @@ Queue-based RunPod Serverless worker for `unsloth/Qwen-Image-Edit-2511-GGUF` usi
 
 The image build is trimmed for RunPod's builder by starting from `runpod/worker-comfyui:5.5.1-base` instead of installing ComfyUI from scratch.
 
+The Docker image also sets `NVIDIA_DISABLE_REQUIRE=1` to bypass the base image's strict CUDA requirement gate during container init on RunPod hosts that otherwise reject startup before the worker code even runs.
+
 ## What Changed
 
 This repo no longer uses Diffusers.
