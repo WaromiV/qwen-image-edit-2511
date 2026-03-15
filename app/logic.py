@@ -1,8 +1,11 @@
 import base64
 import copy
+import datetime as dt
 import io
 import json
 import os
+import resource
+import shutil
 import subprocess
 import threading
 import time
@@ -59,39 +62,244 @@ MODEL_SPECS = [
     },
 ]
 
+BOOT_MONO = time.monotonic()
 START_LOCK = threading.Lock()
 SERVER_PROCESS = None
 
 
-def _download_file(url: str, destination: Path) -> None:
+def _iso_timestamp() -> str:
+    return (
+        dt.datetime.now(dt.timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _safe_disk_usage(path: Path):
+    try:
+        total, used, free = shutil.disk_usage(path)
+        return {"path": str(path), "total": total, "used": used, "free": free}
+    except Exception as exc:  # noqa: BLE001
+        return {"path": str(path), "error": str(exc)}
+
+
+def _proc_status() -> dict:
+    data = {
+        "pid": os.getpid(),
+        "threads": None,
+        "vmrss_kb": None,
+        "vmhwm_kb": None,
+        "loadavg": None,
+        "ru_maxrss_kb": None,
+    }
+    try:
+        load1, load5, load15 = os.getloadavg()
+        data["loadavg"] = [load1, load5, load15]
+    except OSError:
+        pass
+
+    try:
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        data["ru_maxrss_kb"] = usage.ru_maxrss
+    except Exception:  # noqa: BLE001
+        pass
+
+    status_path = Path("/proc/self/status")
+    if status_path.exists():
+        for line in status_path.read_text(errors="ignore").splitlines():
+            if line.startswith("Threads:"):
+                data["threads"] = int(line.split()[1])
+            elif line.startswith("VmRSS:"):
+                data["vmrss_kb"] = int(line.split()[1])
+            elif line.startswith("VmHWM:"):
+                data["vmhwm_kb"] = int(line.split()[1])
+    return data
+
+
+def _gpu_snapshot():
+    command = [
+        "nvidia-smi",
+        "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu,power.draw",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        result = subprocess.run(  # noqa: S603
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+    gpus = []
+    for line in result.stdout.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 7:
+            continue
+        gpus.append(
+            {
+                "index": int(parts[0]),
+                "name": parts[1],
+                "memory_total_mb": float(parts[2]),
+                "memory_used_mb": float(parts[3]),
+                "utilization_gpu_pct": float(parts[4]),
+                "temperature_c": float(parts[5]),
+                "power_draw_w": float(parts[6]),
+            }
+        )
+    return gpus
+
+
+def _resource_snapshot() -> dict:
+    paths = [Path("/"), Path("/tmp"), COMFYUI_DIR, MODEL_ROOT]
+    if RUNPOD_VOLUME.exists():
+        paths.append(RUNPOD_VOLUME)
+
+    snapshot = {
+        "process": _proc_status(),
+        "disk": [],
+        "gpu": _gpu_snapshot(),
+    }
+    seen = set()
+    for path in paths:
+        resolved = str(path)
+        if resolved in seen or not path.exists():
+            continue
+        seen.add(resolved)
+        snapshot["disk"].append(_safe_disk_usage(path))
+    return snapshot
+
+
+def _model_file_state() -> list[dict]:
+    state = []
+    for spec in MODEL_SPECS:
+        path = MODEL_ROOT / spec["filename"]
+        state.append(
+            {
+                "filename": spec["filename"],
+                "path": str(path),
+                "exists": path.exists(),
+                "size": path.stat().st_size if path.exists() else None,
+            }
+        )
+    return state
+
+
+def log_event(
+    stage: str, *, request_id=None, include_resources=False, **fields
+) -> None:
+    payload = {
+        "ts": _iso_timestamp(),
+        "mono_s": round(time.monotonic() - BOOT_MONO, 3),
+        "stage": stage,
+    }
+    if request_id is not None:
+        payload["request_id"] = request_id
+    payload.update(fields)
+    if include_resources:
+        payload["resources"] = _resource_snapshot()
+    print(json.dumps(payload, sort_keys=True, default=str), flush=True)
+
+
+def _download_headers() -> dict:
+    token = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
+    headers = {"User-Agent": "opencode-qwen-worker/1.0"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _download_file(url: str, destination: Path, *, request_id=None) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp_path = destination.with_suffix(destination.suffix + ".part")
-    with requests.get(url, stream=True, timeout=600) as response:
+    started = time.monotonic()
+    bytes_written = 0
+    log_event(
+        "model.download.start",
+        request_id=request_id,
+        url=url,
+        destination=str(destination),
+        include_resources=True,
+    )
+    with requests.get(
+        url,
+        stream=True,
+        timeout=600,
+        headers=_download_headers(),
+    ) as response:
         response.raise_for_status()
         with temp_path.open("wb") as handle:
             for chunk in response.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     handle.write(chunk)
+                    bytes_written += len(chunk)
     temp_path.replace(destination)
+    log_event(
+        "model.download.done",
+        request_id=request_id,
+        url=url,
+        destination=str(destination),
+        bytes_written=bytes_written,
+        elapsed_s=round(time.monotonic() - started, 3),
+        include_resources=True,
+    )
 
 
-def _link_or_copy(source: Path, target: Path) -> None:
+def _link_or_copy(source: Path, target: Path, *, request_id=None) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() or target.is_symlink():
+        log_event(
+            "model.link.skip",
+            request_id=request_id,
+            source=str(source),
+            target=str(target),
+        )
         return
     try:
         target.symlink_to(source)
+        mode = "symlink"
     except OSError:
         target.write_bytes(source.read_bytes())
+        mode = "copy"
+    log_event(
+        "model.link.done",
+        request_id=request_id,
+        source=str(source),
+        target=str(target),
+        mode=mode,
+    )
 
 
-def ensure_model_files() -> None:
+def ensure_model_files(*, request_id=None) -> None:
+    log_event(
+        "model.ensure.start",
+        request_id=request_id,
+        model_root=str(MODEL_ROOT),
+        model_files=_model_file_state(),
+        include_resources=True,
+    )
     for spec in MODEL_SPECS:
         source = MODEL_ROOT / spec["filename"]
         if not source.exists():
-            _download_file(spec["url"], source)
+            _download_file(spec["url"], source, request_id=request_id)
+        else:
+            log_event(
+                "model.ensure.hit",
+                request_id=request_id,
+                filename=spec["filename"],
+                path=str(source),
+                size=source.stat().st_size,
+            )
         target = COMFYUI_DIR / "models" / spec["subdir"] / spec["filename"]
-        _link_or_copy(source, target)
+        _link_or_copy(source, target, request_id=request_id)
+    log_event(
+        "model.ensure.done",
+        request_id=request_id,
+        model_files=_model_file_state(),
+        include_resources=True,
+    )
 
 
 def _log_path() -> Path:
@@ -107,17 +315,35 @@ def _server_alive() -> bool:
     return SERVER_PROCESS is not None and SERVER_PROCESS.poll() is None
 
 
-def _wait_until_ready(timeout: int = 300) -> None:
-    deadline = time.time() + timeout
+def _wait_until_ready(timeout: int = 300, *, request_id=None) -> None:
+    deadline = time.monotonic() + timeout
+    attempts = 0
     last_error = None
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
+        attempts += 1
         try:
             response = requests.get(f"{COMFY_BASE_URL}/system_stats", timeout=5)
             if response.ok:
+                data = response.json()
+                log_event(
+                    "comfy.ready",
+                    request_id=request_id,
+                    attempts=attempts,
+                    system_stats=data,
+                    include_resources=True,
+                )
                 return
             last_error = f"HTTP {response.status_code}"
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
+        if attempts == 1 or attempts % 5 == 0:
+            log_event(
+                "comfy.wait",
+                request_id=request_id,
+                attempts=attempts,
+                last_error=last_error,
+                include_resources=True,
+            )
         time.sleep(2)
 
     log_path = _log_path()
@@ -127,15 +353,38 @@ def _wait_until_ready(timeout: int = 300) -> None:
     raise RuntimeError(f"ComfyUI did not become ready: {last_error}\n{tail}")
 
 
-def warmup_model() -> None:
+def warmup_model(*, request_id=None) -> None:
     global SERVER_PROCESS
     with START_LOCK:
         if _server_alive():
+            log_event(
+                "warmup.skip",
+                request_id=request_id,
+                reason="server_already_alive",
+                comfy_pid=SERVER_PROCESS.pid,
+                include_resources=True,
+            )
             return
 
-        ensure_model_files()
+        warmup_started = time.monotonic()
+        log_event(
+            "warmup.start",
+            request_id=request_id,
+            comfy_dir=str(COMFYUI_DIR),
+            comfy_base_url=COMFY_BASE_URL,
+            workflow_path=str(WORKFLOW_PATH),
+            include_resources=True,
+        )
+        ensure_model_files(request_id=request_id)
         log_path = _log_path()
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_event(
+            "comfy.process.spawn",
+            request_id=request_id,
+            command=_start_command(),
+            cwd=str(COMFYUI_DIR),
+            log_path=str(log_path),
+        )
         with log_path.open("ab") as log_file:
             SERVER_PROCESS = subprocess.Popen(  # noqa: S603
                 _start_command(),
@@ -144,7 +393,19 @@ def warmup_model() -> None:
                 stderr=subprocess.STDOUT,
                 env=os.environ.copy(),
             )
-        _wait_until_ready()
+        log_event(
+            "comfy.process.spawned",
+            request_id=request_id,
+            comfy_pid=SERVER_PROCESS.pid,
+        )
+        _wait_until_ready(request_id=request_id)
+        log_event(
+            "warmup.done",
+            request_id=request_id,
+            elapsed_s=round(time.monotonic() - warmup_started, 3),
+            comfy_pid=SERVER_PROCESS.pid,
+            include_resources=True,
+        )
 
 
 def _decode_image(value: str) -> bytes:
@@ -153,41 +414,76 @@ def _decode_image(value: str) -> bytes:
     return base64.b64decode(value)
 
 
-def _load_image(job_input: dict) -> Image.Image:
+def _load_image(job_input: dict, *, request_id=None) -> Image.Image:
+    source_kind = None
     if job_input.get("image_base64"):
         raw = _decode_image(job_input["image_base64"])
-        return Image.open(io.BytesIO(raw)).convert("RGB")
-    if job_input.get("image_url"):
+        image = Image.open(io.BytesIO(raw)).convert("RGB")
+        source_kind = "image_base64"
+    elif job_input.get("image_url"):
         response = requests.get(job_input["image_url"], timeout=120)
         response.raise_for_status()
-        return Image.open(io.BytesIO(response.content)).convert("RGB")
-    if job_input.get("image_path"):
-        return Image.open(job_input["image_path"]).convert("RGB")
-    if job_input.get("images"):
+        image = Image.open(io.BytesIO(response.content)).convert("RGB")
+        source_kind = "image_url"
+    elif job_input.get("image_path"):
+        image = Image.open(job_input["image_path"]).convert("RGB")
+        source_kind = "image_path"
+    elif job_input.get("images"):
         first = job_input["images"][0]
         if isinstance(first, str):
-            return Image.open(io.BytesIO(_decode_image(first))).convert("RGB")
-        if first.get("image_base64"):
-            return Image.open(io.BytesIO(_decode_image(first["image_base64"]))).convert(
-                "RGB"
-            )
-        if first.get("image_url"):
+            image = Image.open(io.BytesIO(_decode_image(first))).convert("RGB")
+            source_kind = "images[0]:string"
+        elif first.get("image_base64"):
+            image = Image.open(
+                io.BytesIO(_decode_image(first["image_base64"]))
+            ).convert("RGB")
+            source_kind = "images[0].image_base64"
+        elif first.get("image_url"):
             response = requests.get(first["image_url"], timeout=120)
             response.raise_for_status()
-            return Image.open(io.BytesIO(response.content)).convert("RGB")
-        if first.get("image_path"):
-            return Image.open(first["image_path"]).convert("RGB")
-    raise ValueError("Provide image_base64, image_url, image_path, or images")
+            image = Image.open(io.BytesIO(response.content)).convert("RGB")
+            source_kind = "images[0].image_url"
+        elif first.get("image_path"):
+            image = Image.open(first["image_path"]).convert("RGB")
+            source_kind = "images[0].image_path"
+        else:
+            raise ValueError("First images[] item is missing image data")
+    else:
+        raise ValueError("Provide image_base64, image_url, image_path, or images")
+
+    log_event(
+        "request.image.loaded",
+        request_id=request_id,
+        source_kind=source_kind,
+        image_mode=image.mode,
+        image_size=list(image.size),
+    )
+    return image
 
 
-def _write_input_image(image: Image.Image, job_id: str) -> str:
+def _write_input_image(image: Image.Image, job_id: str, *, request_id=None) -> str:
     filename = f"{job_id}.png"
-    image.save(COMFYUI_DIR / "input" / filename, format="PNG")
+    output_path = COMFYUI_DIR / "input" / filename
+    image.save(output_path, format="PNG")
+    log_event(
+        "request.image.saved",
+        request_id=request_id,
+        filename=filename,
+        path=str(output_path),
+        size=output_path.stat().st_size,
+    )
     return filename
 
 
-def _load_workflow() -> dict:
-    return json.loads(WORKFLOW_PATH.read_text())
+def _load_workflow(*, request_id=None) -> dict:
+    workflow = json.loads(WORKFLOW_PATH.read_text())
+    log_event(
+        "workflow.loaded",
+        request_id=request_id,
+        workflow_path=str(WORKFLOW_PATH),
+        node_count=len(workflow),
+    )
+    return workflow
 
 
 def _patch_workflow(
@@ -201,6 +497,7 @@ def _patch_workflow(
     width: int,
     height: int,
     filename_prefix: str,
+    request_id=None,
 ) -> dict:
     patched = copy.deepcopy(workflow)
     patched["1"]["inputs"]["image"] = input_filename
@@ -218,40 +515,117 @@ def _patch_workflow(
     patched["15"]["inputs"]["filename_prefix"] = filename_prefix
     patched["16"]["inputs"]["width"] = width
     patched["16"]["inputs"]["height"] = height
+    log_event(
+        "workflow.patched",
+        request_id=request_id,
+        input_filename=input_filename,
+        prompt_preview=prompt[:160],
+        seed=seed,
+        steps=steps,
+        true_cfg_scale=true_cfg_scale,
+        width=width,
+        height=height,
+        filename_prefix=filename_prefix,
+    )
     return patched
 
 
-def _submit_prompt(workflow: dict) -> str:
+def _submit_prompt(workflow: dict, *, request_id=None) -> str:
     payload = {"prompt": workflow, "client_id": str(uuid.uuid4())}
     response = requests.post(f"{COMFY_BASE_URL}/prompt", json=payload, timeout=30)
     response.raise_for_status()
     data = response.json()
+    log_event(
+        "prompt.submitted",
+        request_id=request_id,
+        prompt_id=data["prompt_id"],
+        number=data.get("number"),
+        node_errors=data.get("node_errors"),
+    )
     return data["prompt_id"]
 
 
-def _poll_history(prompt_id: str, timeout: int = 1800) -> dict:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+def _poll_history(prompt_id: str, *, timeout: int = 1800, request_id=None) -> dict:
+    deadline = time.monotonic() + timeout
+    polls = 0
+    while time.monotonic() < deadline:
+        polls += 1
         response = requests.get(f"{COMFY_BASE_URL}/history/{prompt_id}", timeout=30)
         response.raise_for_status()
         data = response.json()
         if data.get(prompt_id):
-            return data[prompt_id]
+            history = data[prompt_id]
+            log_event(
+                "prompt.history.ready",
+                request_id=request_id,
+                prompt_id=prompt_id,
+                polls=polls,
+                status=(history.get("status") or {}).get("status_str"),
+                completed=(history.get("status") or {}).get("completed"),
+            )
+            return history
+        if polls == 1 or polls % 5 == 0:
+            log_event(
+                "prompt.history.wait",
+                request_id=request_id,
+                prompt_id=prompt_id,
+                polls=polls,
+                include_resources=True,
+            )
         time.sleep(2)
     raise TimeoutError(
         f"Timed out waiting for ComfyUI history for prompt_id={prompt_id}"
     )
 
 
-def _extract_image_metadata(history: dict) -> dict:
+def _summarize_history_error(history: dict) -> dict:
+    status = history.get("status") or {}
+    messages = status.get("messages") or []
+    last_error = None
+    for item in messages:
+        if item and item[0] == "execution_error":
+            last_error = item[1]
+    summary = {
+        "status_str": status.get("status_str"),
+        "completed": status.get("completed"),
+        "messages_count": len(messages),
+        "outputs_keys": sorted((history.get("outputs") or {}).keys()),
+    }
+    if last_error:
+        summary.update(
+            {
+                "node_id": last_error.get("node_id"),
+                "node_type": last_error.get("node_type"),
+                "exception_type": last_error.get("exception_type"),
+                "exception_message": last_error.get("exception_message"),
+                "executed_nodes": last_error.get("executed"),
+            }
+        )
+    return summary
+
+
+def _extract_image_metadata(history: dict, *, request_id=None) -> dict:
     outputs = history.get("outputs") or {}
     images = (outputs.get("15") or {}).get("images") or []
     if not images:
-        raise RuntimeError(f"ComfyUI produced no images: {history}")
-    return images[0]
+        summary = _summarize_history_error(history)
+        log_event(
+            "prompt.history.error",
+            request_id=request_id,
+            summary=summary,
+            include_resources=True,
+        )
+        raise RuntimeError(f"ComfyUI produced no images: {summary}")
+    image_meta = images[0]
+    log_event(
+        "prompt.history.output",
+        request_id=request_id,
+        image_meta=image_meta,
+    )
+    return image_meta
 
 
-def _fetch_output_image(image_meta: dict) -> bytes:
+def _fetch_output_image(image_meta: dict, *, request_id=None) -> bytes:
     query = urlencode(
         {
             "filename": image_meta["filename"],
@@ -261,17 +635,32 @@ def _fetch_output_image(image_meta: dict) -> bytes:
     )
     response = requests.get(f"{COMFY_BASE_URL}/view?{query}", timeout=120)
     response.raise_for_status()
+    log_event(
+        "prompt.output.fetched",
+        request_id=request_id,
+        filename=image_meta["filename"],
+        bytes=len(response.content),
+    )
     return response.content
 
 
-def edit_image(job_input: dict) -> dict:
+def edit_image(job_input: dict, *, request_id=None) -> dict:
+    started = time.monotonic()
     prompt = (job_input.get("prompt") or "").strip()
     if not prompt:
         raise ValueError("Missing required field: prompt")
 
-    warmup_model()
+    log_event(
+        "request.start",
+        request_id=request_id,
+        prompt_len=len(prompt),
+        provided_keys=sorted(job_input.keys()),
+        include_resources=True,
+    )
 
-    image = _load_image(job_input)
+    warmup_model(request_id=request_id)
+
+    image = _load_image(job_input, request_id=request_id)
     width = int(job_input.get("width", DEFAULT_WIDTH))
     height = int(job_input.get("height", DEFAULT_HEIGHT))
     steps = int(
@@ -280,9 +669,9 @@ def edit_image(job_input: dict) -> dict:
     true_cfg_scale = float(job_input.get("true_cfg_scale", DEFAULT_TRUE_CFG_SCALE))
     seed = int(job_input.get("seed", 0))
     job_id = uuid.uuid4().hex
-    input_filename = _write_input_image(image, job_id)
+    input_filename = _write_input_image(image, job_id, request_id=request_id)
     workflow = _patch_workflow(
-        _load_workflow(),
+        _load_workflow(request_id=request_id),
         input_filename=input_filename,
         prompt=prompt,
         seed=seed,
@@ -291,14 +680,15 @@ def edit_image(job_input: dict) -> dict:
         width=width,
         height=height,
         filename_prefix=f"QwenImageEditGGUF_{job_id}",
+        request_id=request_id,
     )
-    prompt_id = _submit_prompt(workflow)
-    history = _poll_history(prompt_id)
-    image_meta = _extract_image_metadata(history)
-    output_bytes = _fetch_output_image(image_meta)
+    prompt_id = _submit_prompt(workflow, request_id=request_id)
+    history = _poll_history(prompt_id, request_id=request_id)
+    image_meta = _extract_image_metadata(history, request_id=request_id)
+    output_bytes = _fetch_output_image(image_meta, request_id=request_id)
     output_image = Image.open(io.BytesIO(output_bytes))
 
-    return {
+    result = {
         "ok": True,
         "model_id": f"unsloth/Qwen-Image-Edit-2511-GGUF::{GGUF_FILENAME}",
         "runtime": "comfyui-gguf",
@@ -312,3 +702,12 @@ def edit_image(job_input: dict) -> dict:
         "prompt_id": prompt_id,
         "output_filename": image_meta["filename"],
     }
+    log_event(
+        "request.done",
+        request_id=request_id,
+        prompt_id=prompt_id,
+        output_filename=image_meta["filename"],
+        elapsed_s=round(time.monotonic() - started, 3),
+        include_resources=True,
+    )
+    return result
