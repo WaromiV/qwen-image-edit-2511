@@ -112,3 +112,5 @@ Accepted image inputs:
 - It uses ComfyUI native Qwen edit nodes and swaps the stock model loader for `UnetLoaderGGUF`
 
 Release trigger note: this line exists to force a fresh RunPod rebuild when needed.
+
+Release trigger note 2: another no-op line for a fresh rebuild.
