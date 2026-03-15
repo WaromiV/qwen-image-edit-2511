@@ -104,6 +104,7 @@ Accepted image inputs:
 - `PRELOAD_MODEL` now defaults to `1` so ComfyUI is started before the first job instead of inside request execution
 - ComfyUI now starts with `--highvram`
 - The workflow now uses `UnetLoaderGGUFAdvanced` with `optimize=triton` and `dequant_dtype=float16`
+- The Docker image now installs `build-essential` and sets `CC`/`CXX` so Triton can compile its runtime helpers at inference time
 - This is aimed at reducing the dequantization overhead that makes `Q2_K` look much slower than its file size suggests
 
 ## Pod Volume Notes

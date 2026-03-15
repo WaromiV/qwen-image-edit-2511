@@ -3,6 +3,8 @@ FROM runpod/worker-comfyui:5.5.1-base
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     NVIDIA_DISABLE_REQUIRE=1 \
+    CC=/usr/bin/gcc \
+    CXX=/usr/bin/g++ \
     COMFYUI_DIR=/comfyui \
     COMFY_HOST=127.0.0.1 \
     COMFY_PORT=8188 \
@@ -13,6 +15,10 @@ ENV PYTHONUNBUFFERED=1 \
     PRELOAD_MODEL=1
 
 WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
 
