@@ -1,0 +1,12 @@
+{
+  "tests": [
+    {
+      "name": "self-test",
+      "description": "Verifies the handler responds to the built-in self_test flag.",
+      "input": "test_input.json",
+      "expected": {
+        "output": {"ok": true, "self_test": true}
+      }
+    }
+  ]
+}

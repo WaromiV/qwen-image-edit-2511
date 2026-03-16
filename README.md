@@ -17,6 +17,8 @@ This repo no longer uses Diffusers.
 - Base image: `runpod/worker-comfyui:5.5.1-base`
 - Custom node source: `city96/ComfyUI-GGUF`
 
+The workflow is driven by `workflow/02_qwen_Image_edit_subgraphed.json` (the subgraph you supplied), so that file is the authoritative pipeline definition the handler patches at runtime.
+
 ## Repo Layout
 
 ```text
@@ -25,7 +27,7 @@ This repo no longer uses Diffusers.
 │   ├── __init__.py
 │   └── logic.py
 ├── workflow/
-│   └── qwen_image_edit_2511_gguf_single.json
+│   └── 02_qwen_Image_edit_subgraphed.json
 ├── .dockerignore
 ├── .gitignore
 ├── .runpod/
@@ -72,6 +74,51 @@ Accepted image inputs:
 - `image_path`
 - `images` (only the first image is used in the current single-image workflow)
 
+### Batch requests
+
+Add a `batch` list to the input to process multiple edits in one queue job. Each entry is merged with the top-level fields so you can share defaults (e.g., `width`, `height`, `num_inference_steps`) while overriding `prompt` or the source image per batch item.
+
+```json
+{
+  "input": {
+    "width": 1024,
+    "height": 1024,
+    "batch": [
+      {
+        "prompt": "Brighten the scene and add neon lights.",
+        "image_url": "https://example.com/base.png"
+      },
+      {
+        "prompt": "Make the background misty and cinematic.",
+        "image_base64": "<base64>"
+      }
+    ]
+  }
+}
+```
+
+The handler responds with a `batch` array where each entry mirrors the single-request response and includes a `request_id` for the batch item:
+
+```json
+{
+  "ok": true,
+  "batch": [
+    {
+      "request_id": "<base>.batch0",
+      "model_id": "...",
+      "image_base64": "<base64>",
+      "prompt_id": "..."
+    },
+    {
+      "request_id": "<base>.batch1",
+      "model_id": "...",
+      "image_base64": "<base64>",
+      "prompt_id": "..."
+    }
+  ]
+}
+```
+
 ## Output Shape
 
 ```json
@@ -102,7 +149,7 @@ Accepted image inputs:
 ## Performance Notes
 
 - `PRELOAD_MODEL` now defaults to `1` so ComfyUI is started before the first job instead of inside request execution
-- ComfyUI now starts with `--highvram`
+- ComfyUI now starts without `--highvram` to keep VRAM usage manageable on 24 GB cards
 - The workflow now uses `UnetLoaderGGUFAdvanced` with `optimize=none` and `dequant_dtype=float16`
 - The Docker image still carries compiler/runtime prerequisites, but Triton optimization is disabled because it is failing to compile reliably in this deployment
 - This favors a stable working GGUF path over the experimental Triton branch

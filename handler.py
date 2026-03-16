@@ -1,5 +1,6 @@
 import os
 import traceback
+import uuid
 
 import runpod
 
@@ -14,7 +15,12 @@ if os.getenv("PRELOAD_MODEL", "0") == "1":
 
 def handler(job):
     job_input = job.get("input") or {}
-    request_id = job.get("id") or job.get("requestId") or job.get("request_id")
+    request_id = (
+        job.get("id")
+        or job.get("requestId")
+        or job.get("request_id")
+        or uuid.uuid4().hex
+    )
 
     log_event(
         "handler.received",
@@ -33,7 +39,43 @@ def handler(job):
             "runtime": "comfyui-gguf",
         }
 
+    batch_entries = job_input.get("batch")
     try:
+        if batch_entries is not None:
+            if not isinstance(batch_entries, list):
+                raise ValueError("batch must be a list of request objects")
+            base_input = {k: v for k, v in job_input.items() if k != "batch"}
+            batch_results = []
+            log_event(
+                "handler.batch.start",
+                request_id=request_id,
+                batch_size=len(batch_entries),
+                include_resources=True,
+            )
+            for index, raw_entry in enumerate(batch_entries):
+                if not isinstance(raw_entry, dict):
+                    raise ValueError(
+                        "each batch entry must be a dict of request fields"
+                    )
+                entry = {k: v for k, v in raw_entry.items() if k != "batch"}
+                sub_input = {**base_input, **entry}
+                sub_request_id = f"{request_id}.batch{index}"
+                log_event(
+                    "handler.batch.item",
+                    request_id=request_id,
+                    batch_index=index,
+                    batch_request_id=sub_request_id,
+                )
+                result = edit_image(sub_input, request_id=sub_request_id)
+                combined = {"request_id": sub_request_id, **result}
+                batch_results.append(combined)
+            log_event(
+                "handler.batch.done",
+                request_id=request_id,
+                batch_size=len(batch_results),
+                include_resources=True,
+            )
+            return {"ok": True, "batch": batch_results}
         result = edit_image(job_input, request_id=request_id)
         log_event("handler.success", request_id=request_id, include_resources=True)
         return result

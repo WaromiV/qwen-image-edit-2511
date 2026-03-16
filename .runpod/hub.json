@@ -1,6 +1,6 @@
 {
   "title": "Qwen Image Edit 2511",
-  "description": "Queue-based RunPod Serverless worker for Qwen-Image-Edit-2511 image editing.",
+  "description": "Queue-based RunPod worker for the 02_qwen_Image_edit_subgraphed pipeline (Qwen Image Edit 2511).",
   "type": "serverless",
   "category": "image",
   "iconUrl": "https://dummyimage.com/100x100/111827/ffffff&text=Qwen",

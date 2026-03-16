@@ -22,7 +22,7 @@ COMFY_HOST = os.getenv("COMFY_HOST", "127.0.0.1")
 COMFY_PORT = int(os.getenv("COMFY_PORT", "8188"))
 COMFY_BASE_URL = f"http://{COMFY_HOST}:{COMFY_PORT}"
 WORKFLOW_PATH = Path(
-    os.getenv("WORKFLOW_PATH", "/app/workflow/qwen_image_edit_2511_gguf_single.json")
+    os.getenv("WORKFLOW_PATH", "/app/workflow/02_qwen_Image_edit_subgraphed.json")
 )
 GGUF_FILENAME = "qwen-image-edit-2511-Q2_K.gguf"
 TEXT_ENCODER_FILENAME = "qwen_2.5_vl_7b_fp8_scaled.safetensors"

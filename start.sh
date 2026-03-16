@@ -17,5 +17,5 @@ if [ ! -e /usr/lib/x86_64-linux-gnu/libcuda.so ] && [ -e /usr/lib/x86_64-linux-g
 fi
 
 cd "${COMFYUI_DIR:-/comfyui}"
-log "start.sh.exec" "Launching ComfyUI main.py with highvram"
-exec python -u main.py --disable-auto-launch --disable-metadata --highvram --listen "${COMFY_HOST:-127.0.0.1}" --port "${COMFY_PORT:-8188}" --log-stdout
+log "start.sh.exec" "Launching ComfyUI main.py"
+exec python -u main.py --disable-auto-launch --disable-metadata --listen "${COMFY_HOST:-127.0.0.1}" --port "${COMFY_PORT:-8188}" --log-stdout
